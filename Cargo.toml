@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 bevy = {version ="0.15", features = ["wayland"]}
+indexmap = "2.11.4"
+thiserror = "2.0.17"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 bevy = { version = "0.15", default-features = false, features = [
