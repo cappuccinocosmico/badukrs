@@ -46,10 +46,54 @@ impl<const SIZE: usize> Board<SIZE> {
     }
 }
 
+pub struct BadukClassical<const SIZE: usize> {
+    pub turn: Player,
+    pub board: Board<SIZE>,
+    pub captures: (u32, u32), // (black, white)
+    pub ko_point: Option<(usize, usize)>,
+}
+
+pub enum SupportedGames {
+    BadukClassic(BadukClassical<19>),
+    BadukBeginner(BadukClassical<13>),
+    BadukNewbie(BadukClassical<9>),
+}
+// Players and equipment
+//
+//     Rule 1.[7] Players: Go is a game between two players, called Black and White.
+//     Rule 2.[8] Board: Go is played on a plain grid of 19 horizontal and 19 vertical lines, called a board.
+//         Definition. ("Intersection") A point on the board where a horizontal line meets a vertical line is called an intersection.
+//     Rule 3.[9][10] Stones: Go is played with playing tokens known as stones. Each player has at their disposal an adequate supply (usually 180) of stones of the same color.
+//
+// Positions
+//
+//     Rule 4.[11][12] Positions: At any time in the game, each intersection on the board is in one and only one of the following three states: 1) empty; 2) occupied by a black stone; or 3) occupied by a white stone. A position consists of an indication of the state of each intersection.
+//         Definition. ("Adjacent") Two intersections are said to be adjacent if they are connected by a horizontal or vertical line with no other intersections between them.[13] Note that intersections which are one away from each other diagonally, i.e., intersections that are connected by one horizontal and one vertical line, are not considered adjacent.
+//         Definition.[14] ("Connected") In a given position, two placed stones of the same color (or two empty intersections) are said to be connected if it is possible to draw a path from one intersection to the other by passing through only adjacent intersections of the same state (empty, occupied by white, or occupied by black).
+//         Definition. ("Liberty") In a given position, a liberty of a placed stone is an empty intersection adjacent to that stone or adjacent to a stone which is connected to that stone.[13]
+//
+// Play
+//
+//     Rule 5.[15] Initial position: At the beginning of the game, the board is empty.
+//     Rule 6.[16] Turns: Black moves first. The players alternate thereafter.
+//     Rule 7.[13] Moving: When it is their turn, a player may either pass (by announcing "pass" and performing no action) or play. A play consists of the following steps (performed in the prescribed order):
+//         Step 1. (Playing a stone) Placing a stone of their color on an empty intersection (chosen subject to Rule 8 and, if it is in effect, to Optional Rule 7A). It can never be moved to another intersection after being played.
+//         Step 2. (Capture) Removing from the board any stones of their opponent's color that have no liberties.
+//         Step 3. (Self-capture) Removing from the board any stones of their own color that have no liberties.
+//     Optional Rule 7A.[17] Prohibition of suicide: A play is illegal if one or more stones of that player's color would be removed in Step 3 of that play.
+//     Rule 8.[18] Prohibition of repetition: A play is illegal if it would have the effect (after all steps of the play have been completed) of creating a position that has occurred previously in the game.
+//
+// End
+//
+//     Rule 9.[19] End: The game ends when both players have passed consecutively. The final position is the position on the board at the time the players pass consecutively.
+//         Definition.[20][21] ("Territory") In the final position, an empty intersection is said to belong to a player's territory if all stones adjacent to it or to an empty intersection connected to it are of that player's color.
+//         Definition.[22] ("Area") In the final position, an intersection is said to belong to a player's area if either: 1) it belongs to that player's territory; or 2) it is occupied by a stone of that player's color.
+//         Definition.[23] ("Score") A player's score is the number of intersections in their area in the final position.
+//     Rule 10.[24] Winner: If one player has a higher score than the other, then that player wins. Otherwise, the game is a draw.
 impl<const SIZE: usize> GameNode<SIZE> {
     pub fn legal_moves(&self) -> Vec<(usize, usize)> {
         let mut moves = Vec::new();
-        let player = self.next_player();
+        let player = self.turn;
 
         for r in 0..SIZE {
             for c in 0..SIZE {
@@ -78,14 +122,6 @@ impl<const SIZE: usize> GameNode<SIZE> {
         // For now, we'll just prevent placing a stone on another stone.
         self.board.get_point(coords.0, coords.1) == Some(Point::Empty)
     }
-
-    fn next_player(&self) -> Player {
-        if let Some(move_info) = &self.move_info {
-            move_info.player.opponent()
-        } else {
-            Player::Black // Black moves first
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -107,19 +143,6 @@ trait StatelessGame: Sized + Clone {
     fn list_all_legal_moves(&self) -> Vec<Self::Move>;
     fn is_legal(&self, game_move: &Self::Move) -> bool;
     fn generate_next_board(&self, game_move: &Self::Move) -> Result<Self, MoveError>;
-}
-
-pub struct BadukClassical<const SIZE: usize> {
-    pub turn: Player,
-    pub board: Board<SIZE>,
-    pub captures: (u32, u32), // (black, white)
-    pub ko_point: Option<(usize, usize)>,
-}
-
-pub enum SupportedGames {
-    BadukClassic(BadukClassical<19>),
-    BadukBeginner(BadukClassical<13>),
-    BadukNewbie(BadukClassical<9>),
 }
 
 #[derive(Clone)]
