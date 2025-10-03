@@ -1,10 +1,8 @@
-use std::{collections::BTreeMap, hash::Hash};
-
-use bevy::utils::hashbrown::HashMap;
 use indexmap::IndexMap;
+use std::hash::Hash;
 use thiserror::Error;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Player {
     Black,
     White,
@@ -44,13 +42,105 @@ impl<const SIZE: usize> Board<SIZE> {
             None
         }
     }
+
+    pub fn is_valid_coordinate(&self, r: usize, c: usize) -> bool {
+        r < SIZE && c < SIZE
+    }
+
+    pub fn place_stone(&mut self, r: usize, c: usize, player: Player) -> bool {
+        if self.is_valid_coordinate(r, c) && self.points[r][c] == Point::Empty {
+            self.points[r][c] = Point::Stone(player);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_stone(&mut self, r: usize, c: usize) {
+        if self.is_valid_coordinate(r, c) {
+            self.points[r][c] = Point::Empty;
+        }
+    }
+
+    pub fn get_adjacent_points(&self, r: usize, c: usize) -> Vec<(usize, usize)> {
+        let mut adjacent = Vec::new();
+
+        if r > 0 {
+            adjacent.push((r - 1, c));
+        }
+        if r + 1 < SIZE {
+            adjacent.push((r + 1, c));
+        }
+        if c > 0 {
+            adjacent.push((r, c - 1));
+        }
+        if c + 1 < SIZE {
+            adjacent.push((r, c + 1));
+        }
+
+        adjacent
+    }
+
+    pub fn get_group(&self, r: usize, c: usize) -> Vec<(usize, usize)> {
+        let mut group = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        if let Some(point) = self.get_point(r, c) {
+            if point != Point::Empty {
+                self.flood_fill_group(r, c, point, &mut group, &mut visited);
+            }
+        }
+
+        group
+    }
+
+    fn flood_fill_group(
+        &self,
+        r: usize,
+        c: usize,
+        target_point: Point,
+        group: &mut Vec<(usize, usize)>,
+        visited: &mut std::collections::HashSet<(usize, usize)>,
+    ) {
+        if visited.contains(&(r, c)) {
+            return;
+        }
+
+        if let Some(current_point) = self.get_point(r, c) {
+            if current_point == target_point {
+                visited.insert((r, c));
+                group.push((r, c));
+
+                for (adj_r, adj_c) in self.get_adjacent_points(r, c) {
+                    self.flood_fill_group(adj_r, adj_c, target_point, group, visited);
+                }
+            }
+        }
+    }
+
+    pub fn count_liberties(&self, group: &[(usize, usize)]) -> usize {
+        let mut liberties = std::collections::HashSet::new();
+
+        for &(r, c) in group {
+            for (adj_r, adj_c) in self.get_adjacent_points(r, c) {
+                if self.get_point(adj_r, adj_c) == Some(Point::Empty) {
+                    liberties.insert((adj_r, adj_c));
+                }
+            }
+        }
+
+        liberties.len()
+    }
 }
 
+#[derive(Clone, Debug)]
 pub struct BadukClassical<const SIZE: usize> {
     pub turn: Player,
     pub board: Board<SIZE>,
     pub captures: (u32, u32), // (black, white)
     pub ko_point: Option<(usize, usize)>,
+    pub consecutive_passes: u8,
+    pub position_history: Vec<[[Point; SIZE]; SIZE]>,
 }
 
 pub enum SupportedGames {
@@ -90,59 +180,359 @@ pub enum SupportedGames {
 //         Definition.[22] ("Area") In the final position, an intersection is said to belong to a player's area if either: 1) it belongs to that player's territory; or 2) it is occupied by a stone of that player's color.
 //         Definition.[23] ("Score") A player's score is the number of intersections in their area in the final position.
 //     Rule 10.[24] Winner: If one player has a higher score than the other, then that player wins. Otherwise, the game is a draw.
-impl<const SIZE: usize> GameNode<SIZE> {
-    pub fn legal_moves(&self) -> Vec<(usize, usize)> {
-        let mut moves = Vec::new();
-        let player = self.turn;
+impl<const SIZE: usize> BadukClassical<SIZE> {
+    pub fn new() -> Self {
+        Self {
+            turn: Player::Black,
+            board: Board::new(),
+            captures: (0, 0),
+            ko_point: None,
+            consecutive_passes: 0,
+            position_history: vec![[[Point::Empty; SIZE]; SIZE]],
+        }
+    }
+
+    pub fn remove_captured_stones(&mut self, opponent: Player) -> u32 {
+        let mut captured_count = 0;
+        let mut stones_to_remove = Vec::new();
 
         for r in 0..SIZE {
             for c in 0..SIZE {
-                if self.board.get_point(r, c) == Some(Point::Empty) {
-                    if self.is_legal((r, c), player) {
-                        moves.push((r, c));
+                if self.board.get_point(r, c) == Some(Point::Stone(opponent)) {
+                    let group = self.board.get_group(r, c);
+                    if !group.is_empty() && self.board.count_liberties(&group) == 0 {
+                        stones_to_remove.extend(group);
                     }
                 }
             }
         }
-        moves
+
+        // Remove duplicates
+        stones_to_remove.sort_unstable();
+        stones_to_remove.dedup();
+
+        for (r, c) in stones_to_remove {
+            self.board.remove_stone(r, c);
+            captured_count += 1;
+        }
+
+        captured_count
     }
 
-    fn is_legal(&self, coords: (usize, usize), player: Player) -> bool {
-        if self.ko_point == Some(coords) {
+    pub fn would_be_suicide(&self, r: usize, c: usize, player: Player) -> bool {
+        let mut temp_board = self.board.clone();
+
+        if !temp_board.place_stone(r, c, player) {
+            return true;
+        }
+
+        // Check if placing this stone would capture opponent stones
+        let opponent = player.opponent();
+        let mut would_capture = false;
+
+        for (adj_r, adj_c) in temp_board.get_adjacent_points(r, c) {
+            if temp_board.get_point(adj_r, adj_c) == Some(Point::Stone(opponent)) {
+                let adj_group = temp_board.get_group(adj_r, adj_c);
+                if temp_board.count_liberties(&adj_group) == 0 {
+                    would_capture = true;
+                    break;
+                }
+            }
+        }
+
+        // If it captures opponent stones, it's not suicide
+        if would_capture {
             return false;
         }
 
-        // A full suicide check is needed here.
-        // This involves:
-        // 1. Simulating the move.
-        // 2. Checking the liberties of the new stone's group.
-        // 3. If the group has no liberties, checking if the move captures any opponent stones.
-        // A move is suicide if the group has 0 liberties AND it captures no opponent stones.
+        // Check if our own group has liberties
+        let our_group = temp_board.get_group(r, c);
+        temp_board.count_liberties(&our_group) == 0
+    }
 
-        // For now, we'll just prevent placing a stone on another stone.
-        self.board.get_point(coords.0, coords.1) == Some(Point::Empty)
+    pub fn would_repeat_position(&self, r: usize, c: usize, player: Player) -> bool {
+        let mut temp_board = self.board.clone();
+
+        if !temp_board.place_stone(r, c, player) {
+            return true;
+        }
+
+        // Simulate captures
+        let opponent = player.opponent();
+        for adj_r in 0..SIZE {
+            for adj_c in 0..SIZE {
+                if temp_board.get_point(adj_r, adj_c) == Some(Point::Stone(opponent)) {
+                    let group = temp_board.get_group(adj_r, adj_c);
+                    if temp_board.count_liberties(&group) == 0 {
+                        for &(gr, gc) in &group {
+                            temp_board.remove_stone(gr, gc);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check against position history
+        self.position_history.contains(&temp_board.points)
+    }
+
+    pub fn is_game_over(&self) -> bool {
+        self.consecutive_passes >= 2
+    }
+
+    pub fn make_move(&mut self, mv: BadukMove) -> Result<(), MoveError> {
+        match mv {
+            BadukMove::Pass => {
+                self.consecutive_passes += 1;
+                self.turn = self.turn.opponent();
+                self.ko_point = None;
+                Ok(())
+            }
+            BadukMove::Play {
+                coordinates: (r, c),
+            } => {
+                if !self.is_legal_move(r, c) {
+                    return Err(MoveError::IllegalMove);
+                }
+
+                // Save current position to history
+                self.position_history.push(self.board.points);
+
+                // Place the stone
+                self.board.place_stone(r, c, self.turn);
+
+                // Reset consecutive passes
+                self.consecutive_passes = 0;
+
+                // Capture opponent stones
+                let opponent = self.turn.opponent();
+                let captured = self.remove_captured_stones(opponent);
+
+                // Update capture count
+                match self.turn {
+                    Player::Black => self.captures.0 += captured,
+                    Player::White => self.captures.1 += captured,
+                }
+
+                // Handle ko detection (simple ko - single stone recapture)
+                self.ko_point = if captured == 1 {
+                    // Check if this was a single stone capture that could create ko
+                    let our_group = self.board.get_group(r, c);
+                    if our_group.len() == 1 && self.board.count_liberties(&our_group) == 1 {
+                        // Find the liberty (potential ko point)
+                        self.board
+                            .get_adjacent_points(r, c)
+                            .into_iter()
+                            .find(|&(adj_r, adj_c)| {
+                                self.board.get_point(adj_r, adj_c) == Some(Point::Empty)
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Switch turns
+                self.turn = self.turn.opponent();
+
+                Ok(())
+            }
+        }
+    }
+
+    fn is_legal_move(&self, r: usize, c: usize) -> bool {
+        // Check if position is empty
+        if self.board.get_point(r, c) != Some(Point::Empty) {
+            return false;
+        }
+
+        // Check ko rule
+        if self.ko_point == Some((r, c)) {
+            return false;
+        }
+
+        // Check suicide rule
+        if self.would_be_suicide(r, c, self.turn) {
+            return false;
+        }
+
+        // Check position repetition
+        if self.would_repeat_position(r, c, self.turn) {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn calculate_territory(
+        &self,
+    ) -> (
+        Vec<(usize, usize)>,
+        Vec<(usize, usize)>,
+        Vec<(usize, usize)>,
+    ) {
+        let mut visited = std::collections::HashSet::new();
+        let mut black_territory = Vec::new();
+        let mut white_territory = Vec::new();
+        let mut neutral_territory = Vec::new();
+
+        for r in 0..SIZE {
+            for c in 0..SIZE {
+                if self.board.get_point(r, c) == Some(Point::Empty) && !visited.contains(&(r, c)) {
+                    let mut empty_group = Vec::new();
+                    let mut bordering_stones = std::collections::HashSet::new();
+
+                    self.flood_fill_territory(
+                        r,
+                        c,
+                        &mut empty_group,
+                        &mut bordering_stones,
+                        &mut visited,
+                    );
+
+                    // Determine territory ownership based on bordering stones
+                    let black_borders = bordering_stones.contains(&Player::Black);
+                    let white_borders = bordering_stones.contains(&Player::White);
+
+                    match (black_borders, white_borders) {
+                        (true, false) => black_territory.extend(empty_group),
+                        (false, true) => white_territory.extend(empty_group),
+                        _ => neutral_territory.extend(empty_group), // Both or neither
+                    }
+                }
+            }
+        }
+
+        (black_territory, white_territory, neutral_territory)
+    }
+
+    fn flood_fill_territory(
+        &self,
+        r: usize,
+        c: usize,
+        empty_group: &mut Vec<(usize, usize)>,
+        bordering_stones: &mut std::collections::HashSet<Player>,
+        visited: &mut std::collections::HashSet<(usize, usize)>,
+    ) {
+        if visited.contains(&(r, c)) {
+            return;
+        }
+
+        match self.board.get_point(r, c) {
+            Some(Point::Empty) => {
+                visited.insert((r, c));
+                empty_group.push((r, c));
+
+                for (adj_r, adj_c) in self.board.get_adjacent_points(r, c) {
+                    self.flood_fill_territory(adj_r, adj_c, empty_group, bordering_stones, visited);
+                }
+            }
+            Some(Point::Stone(player)) => {
+                bordering_stones.insert(player);
+            }
+            None => {}
+        }
+    }
+
+    pub fn calculate_score(&self) -> (f32, f32) {
+        let (black_territory, white_territory, _) = self.calculate_territory();
+
+        // Count stones on board
+        let mut black_stones = 0;
+        let mut white_stones = 0;
+
+        for r in 0..SIZE {
+            for c in 0..SIZE {
+                match self.board.get_point(r, c) {
+                    Some(Point::Stone(Player::Black)) => black_stones += 1,
+                    Some(Point::Stone(Player::White)) => white_stones += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let black_score = black_stones as f32 + black_territory.len() as f32;
+        let white_score = white_stones as f32 + white_territory.len() as f32 + 6.5; // 6.5 komi
+
+        (black_score, white_score)
+    }
+
+    pub fn get_winner(&self) -> Option<Player> {
+        if !self.is_game_over() {
+            return None;
+        }
+
+        let (black_score, white_score) = self.calculate_score();
+
+        if black_score > white_score {
+            Some(Player::Black)
+        } else if white_score > black_score {
+            Some(Player::White)
+        } else {
+            None // Draw
+        }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct BadukMove {
-    pub player: Player,
-    pub coordinates: (usize, usize),
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum BadukMove {
+    Play { coordinates: (usize, usize) },
+    Pass,
 }
 
 #[derive(Error, Debug)]
-enum MoveError {
+pub enum MoveError {
     #[error("Illegal Move")]
     IllegalMove,
     #[error("Unexpected Missing Move in Game Tree")]
     MissingMove,
 }
 
-trait StatelessGame: Sized + Clone {
+pub trait StatelessGame: Sized + Clone {
     type Move: Hash + Eq + Copy;
     fn list_all_legal_moves(&self) -> Vec<Self::Move>;
     fn is_legal(&self, game_move: &Self::Move) -> bool;
     fn generate_next_board(&self, game_move: &Self::Move) -> Result<Self, MoveError>;
+}
+
+impl<const SIZE: usize> StatelessGame for BadukClassical<SIZE> {
+    type Move = BadukMove;
+
+    fn list_all_legal_moves(&self) -> Vec<Self::Move> {
+        let mut moves = Vec::new();
+
+        // Always allow pass
+        moves.push(BadukMove::Pass);
+
+        // Add all legal stone placements
+        for r in 0..SIZE {
+            for c in 0..SIZE {
+                if self.is_legal_move(r, c) {
+                    moves.push(BadukMove::Play {
+                        coordinates: (r, c),
+                    });
+                }
+            }
+        }
+
+        moves
+    }
+
+    fn is_legal(&self, game_move: &Self::Move) -> bool {
+        match game_move {
+            BadukMove::Pass => true,
+            BadukMove::Play {
+                coordinates: (r, c),
+            } => self.is_legal_move(*r, *c),
+        }
+    }
+
+    fn generate_next_board(&self, game_move: &Self::Move) -> Result<Self, MoveError> {
+        let mut next_game = self.clone();
+        next_game.make_move(*game_move)?;
+        Ok(next_game)
+    }
 }
 
 #[derive(Clone)]
